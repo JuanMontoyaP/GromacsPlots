@@ -228,6 +228,11 @@ class GromacsPlot:
 
         ax.lines[0].set_color('black')
 
+        plt.ylim(
+            min(gyr[:, 1]) - 0.2,
+            max(gyr[:, 1]) + 0.2
+        )
+
         plt.suptitle('Radius of gyration', fontsize=20, y=1)
 
         plt.savefig(
