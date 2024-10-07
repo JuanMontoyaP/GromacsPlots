@@ -2,7 +2,6 @@
 This script graphs the results of MD simulations
 """
 #!/usr/bin/env python3 -u
-import sys
 import logging
 import click
 
@@ -14,13 +13,16 @@ logging.basicConfig(
     level=logging.DEBUG
 )
 
+
 class GromacsPlots:
     """
     This class generates the plots
     """
-    def __init__(self, path: str, protein: str):
+
+    def __init__(self, path: str, protein: str, run_gromacs: bool = False) -> None:
         self.path = path
         self.protein = protein
+        self.run_gromacs: bool = run_gromacs
 
     def generate_gromacs_data(self):
         """
@@ -40,20 +42,24 @@ class GromacsPlots:
         npt_data = gromacs.generate_npt_data()
         logging.info(npt_data)
 
-        try:
+        if self.run_gromacs:
             logging.info('Generating final xtc file')
             gromacs.generate_final_xtc_file()
-        except ValueError as e:
-            logging.error('Error generating final xtc file: %s', e)
-            sys.exit(1)
 
-        logging.info('Fixing periodicity')
-        periodicity = gromacs.fix_periodicity()
-        logging.info(periodicity)
+            periodicity = gromacs.fix_periodicity()
+            logging.info(periodicity)
+
+            gromacs.generate_video()
+
+        logging.info('Generate initial configuration file')
+        gromacs.get_initial_configuration()
+
+        logging.info('Generate trajectory information')
+        _ = gromacs.get_md_frames()
 
         logging.info('Writing RMSD')
         rmsd = gromacs.generate_rmsd()
-        logging.info(rmsd)
+        logging.info(f"\n{rmsd.describe()}")
 
         logging.info('Writing Radius of gyration')
         gyr = gromacs.generate_radius_gyration()
@@ -83,16 +89,15 @@ class GromacsPlots:
         logging.info("Plotting radius of gyration")
         plots.plot_radius_gyration()
 
-    def Run(self, run_gromacs: bool):
+    def Run(self):
         """
         This class run the necessary commands to generate the plots
         """
-
-        if run_gromacs:
-            self.generate_gromacs_data()
+        self.generate_gromacs_data()
 
         logging.info('Generating gromacs plots')
         self.generate_gromacs_plots()
+
 
 @click.command()
 @click.option(
@@ -121,8 +126,9 @@ def cli(path: str, protein: str, run_gromacs: bool = False):
     """
     This is the cli for managing the command line interface
     """
-    gromacs_plots = GromacsPlots(path, protein)
-    gromacs_plots.Run(run_gromacs)
+    gromacs_plots = GromacsPlots(path, protein, run_gromacs)
+    gromacs_plots.Run()
+
 
 if __name__ == '__main__':
     cli()  # pylint: disable=no-value-for-parameter

@@ -2,45 +2,63 @@
 This file generates the data for plotting
 """
 import logging
+from pathlib import Path
+import tarfile
+import re
 import docker
+import pandas as pd
+import numpy as np
+import MDAnalysis as mda
+from MDAnalysis.analysis import rms
 
-from helpers import find_folders_with_same_pattern
+from helpers import find_files_with_same_pattern, create_folder
 
 logging.basicConfig(
     format='[%(asctime)s] - %(levelname)s - %(filename)s - %(funcName)s:%(lineno)d - %(message)s',
     level=logging.INFO
 )
 
+
 class GromacsData:
     """
     This class manages all the functions to generate Gromacs data.
     """
     CONTAINER_WORK_DIR = "/container/data"
+    XTC_FILE = "final.xtc"
+    XTC_NO_PBC_FILE = "fixed.xtc"
 
-    def __init__(self, path: str):
-        self.path = path
-        self.volume = {
-            self.path : {
+    def __init__(self, path: Path):
+        self.path: Path = Path(path)
+        self.volume: dict = {
+            self.path: {
                 'bind': self.CONTAINER_WORK_DIR,
                 'mode': 'rw'
             }
         }
 
-    def _get_last_tpr_file(self):
-        last_folder = find_folders_with_same_pattern(self.path, "my_output_*")[-1]
-        tpr_file = sorted(last_folder.glob('*.tpr'))[0].name
-        return [last_folder.name, tpr_file]
+        create_folder(self.path)
+        self.results_folder: Path = Path(f"{self.path}/results")
 
     def _run_gromacs_container(
-            self,
-            command,
-            working_dir=CONTAINER_WORK_DIR,
-            **kwargs
-        ):
+        self,
+        command,
+        working_dir=CONTAINER_WORK_DIR,
+        **kwargs
+    ):
         """
-        Run the Gromacs container with the specified command and arguments.
+        Runs a Gromacs container with the specified command.
+
+        Parameters:
+            command (str): The command to be executed inside the container.
+            working_dir (str, optional): The working directory inside the container. Defaults
+                to CONTAINER_WORK_DIR.
+            **kwargs: Additional keyword arguments to be passed to the container run method.
+
+        Returns:
+            docker.models.containers.Container: The container object representing the
+                running Gromacs container.
         """
-        gromacs_image = "gromacs/gromacs:2022.2"
+        gromacs_image = "jpmontoya19/gromacs:latest"
         client = docker.from_env()
         return client.containers.run(
             gromacs_image,
@@ -49,6 +67,16 @@ class GromacsData:
             **kwargs
         )
 
+    def _find_last_tpr_file(self) -> Path:
+        """
+        Finds the last TPR file in the given path.
+
+        Returns:
+            A tuple containing the name and path of the last TPR file.
+        """
+        last_tpr = find_files_with_same_pattern(self.path, "md_0_*.tpr")[-1]
+        return (last_tpr.name, last_tpr)
+
     def generate_minimization_data(self):
         """
         Function to generate the minimization energy data
@@ -56,7 +84,7 @@ class GromacsData:
         command = [
             "sh",
             "-c",
-            "echo 10 0 | gmx energy -f em.edr -o potential.xvg"
+            f"echo 10 0 | gmx energy -f em.edr -o {self.results_folder.name}/potential.xvg"
         ]
 
         logging.info(command[-1])
@@ -73,7 +101,10 @@ class GromacsData:
         command = [
             "sh",
             "-c",
-            "echo 16 0 | gmx energy -f nvt.edr -o temperature.xvg"
+            f"""
+                echo 16 0 | \
+                gmx energy -f nvt.edr -o {self.results_folder.name}/temperature.xvg
+            """
         ]
 
         logging.info(command[-1])
@@ -90,7 +121,10 @@ class GromacsData:
         command_pressure = [
             "sh",
             "-c",
-            "echo 18 0 | gmx energy -f npt.edr -o pressure.xvg"
+            f"""
+                echo 18 0 | \
+                gmx energy -f npt.edr -o {self.results_folder.name}/pressure.xvg
+            """
         ]
 
         logging.info(command_pressure[-1])
@@ -102,7 +136,10 @@ class GromacsData:
         command_density = [
             "sh",
             "-c",
-            "echo 24 0 | gmx energy -f npt.edr -o density.xvg"
+            f"""
+                echo 24 0 | \
+                gmx energy -f npt.edr -o {self.results_folder.name}/density.xvg
+            """
         ]
 
         logging.info(command_density[-1])
@@ -117,17 +154,23 @@ class GromacsData:
         """
         Generates the final xvg file joining all the parts of the trajectory
         """
-        steps = find_folders_with_same_pattern(self.path, "my_output_*")
+        steps = find_files_with_same_pattern(
+            self.path, "my_job.output_*.tar.gz")
 
-        xtc_files = ""
+        xtc_files = []
         for step in steps:
-            filename = sorted(step.glob('*.xtc'))
-            if not filename:
-                raise ValueError("Could not find the xtc file")
+            with tarfile.open(step, "r:gz") as tar:
+                for member in tar.getmembers():
+                    if member.name.endswith(".xtc"):
+                        tar.extract(member, path=f"{self.path}")
+                        xtc_files.append(member.name)
 
-            xtc_files += f"{step.name}/{filename[0].name} "
+        command = [
+            "sh",
+            "-c",
+            f"gmx trjcat -f {' '.join(xtc_files)} -o {self.results_folder.name}/{self.XTC_FILE}"
+        ]
 
-        command = ["sh", "-c", f"gmx trjcat -f {xtc_files} -o combined.xtc"]
         logging.info(command[-1])
         _ = self._run_gromacs_container(
             command,
@@ -138,11 +181,18 @@ class GromacsData:
         """
         Function to fix the periodicity of the trajectory.
         """
-        folder, tpr = self._get_last_tpr_file()
+        filename, _ = self._find_last_tpr_file()
         command = [
             "sh",
             "-c",
-            f"echo 1 0 | gmx trjconv -s {folder}/{tpr} -f combined.xtc -o combinedNoPBC.xtc -pbc mol -center" #pylint: disable=line-too-long
+            f"""
+                echo 1 0 | \
+                gmx trjconv \
+                    -s {filename} \
+                    -f {self.results_folder.name}/{self.XTC_FILE} \
+                    -o {self.results_folder.name}/{self.XTC_NO_PBC_FILE} \
+                    -pbc mol -center
+            """
         ]
 
         logging.info(command[-1])
@@ -153,34 +203,45 @@ class GromacsData:
 
         return periodicity
 
-    def generate_rmsd(self):
+    def generate_video(self):
         """
-        Generate rmsd data
+        Generate a video from the trajectory
         """
-        folder, tpr = self._get_last_tpr_file()
+        filename, _ = self._find_last_tpr_file()
         command = [
             "sh",
             "-c",
-            f"echo 4 4 | gmx rms -s {folder}/{tpr} -f combinedNoPBC.xtc -o rmsd.xvg -tu ns"
+            f"""
+                echo 1 | \
+                gmx trjconv \
+                    -s {filename} \
+                    -f {self.results_folder.name}/{self.XTC_NO_PBC_FILE} \
+                    -o {self.results_folder.name}/reduced.xtc \
+                    -dt 250
+            """
         ]
 
         logging.info(command[-1])
-        rmsd = self._run_gromacs_container(
+        _ = self._run_gromacs_container(
             command,
             volumes=self.volume
-        ).decode("utf-8")
-
-        return rmsd
+        )
 
     def generate_radius_gyration(self):
         """
         Generate radius of gyration        
         """
-        folder, tpr = self._get_last_tpr_file()
+        filename, _ = self._find_last_tpr_file()
         command = [
             "sh",
             "-c",
-            f"echo 1 | gmx gyrate -s {folder}/{tpr} -f combinedNoPBC.xtc -o gyrate.xvg"
+            f"""
+                echo 1 | \
+                gmx gyrate \
+                -s {filename} \
+                -f {self.results_folder.name}/{self.XTC_NO_PBC_FILE} \
+                -o {self.results_folder.name}/gyrate.xvg
+            """
         ]
 
         logging.info(command[-1])
@@ -190,3 +251,122 @@ class GromacsData:
         ).decode('utf-8')
 
         return gyr
+
+    def get_initial_configuration(self):
+        """
+        Retrieves the initial configuration of the system.
+
+        Returns:
+            None
+        """
+        filename, _ = self._find_last_tpr_file()
+
+        command = [
+            "sh",
+            "-c",
+            f"""
+                echo 1 | \
+                gmx trjconv \
+                    -s {filename} \
+                    -f {self.results_folder.name}/{self.XTC_NO_PBC_FILE} \
+                    -o {self.results_folder.name}/initial_conf.pdb \
+                    -dump 0
+            """
+        ]
+
+        logging.info(command[-1])
+
+        _ = self._run_gromacs_container(
+            command,
+            volumes=self.volume
+        )
+
+    def get_md_frames(self) -> str:
+        """
+        Generate a doc with the number of frames in the trajectory
+        """
+        command = [
+            "sh",
+            "-c",
+            f"""
+                echo 1 | \
+                gmx check \
+                -f {self.results_folder.name}/{self.XTC_NO_PBC_FILE} \
+                > {self.results_folder.name}/trajectory_info.txt 2>&1
+            """
+        ]
+
+        _ = self._run_gromacs_container(
+            command,
+            volumes=self.volume
+        )
+
+        with open(
+                f"{self.results_folder}/trajectory_info.txt",
+                "r",
+                encoding='utf-8'
+            ) as file:
+            lines = file.readlines()
+
+        last_frame = None
+        for line in lines:
+            match = re.search(r'Last frame\s+(\d+(\.\d+)?)', line)
+
+            if match:
+                last_frame = match.group(1)
+                break
+
+        logging.info("Last frame: %s", last_frame)
+        return last_frame
+    
+    def generate_rmsd(self):
+        """"
+        Generate the RMSD data
+        """
+        print(self.path)
+
+        u = mda.Universe(
+            f"{self.path}/npt.gro",
+            f"{self.path}/results/fixed.xtc",
+            topology_format="GRO",
+            trajectory_format="XTC"
+        )
+
+        total_residues = u.select_atoms('protein').residues.n_residues
+
+        logging.info(f"Total residues: {total_residues}")
+
+        selections = {
+            'Backbone': f"backbone and not (resid {total_residues-200} to {total_residues}) and not (resid 1 to 211)",
+            'Head': "resid 1 to 211",
+            'CRD1': "resid 225 to 341",
+            'CRD2': "resid 369 to 487",
+            'CRD3': "resid 511 to 626",
+            'CRD4': "resid 655 to 778",
+            'CRD5': "resid 807 to 923",
+            'CRD6': "resid 951 to 1079",
+            'CRD7': "resid 1101 to 1212",
+            'CRD8': "resid 1240 to 1355",
+            'Tail': f"resid {total_residues-200} to {total_residues}",
+        }
+
+        df = pd.DataFrame()
+
+        for domain, selection in selections.items():
+            ref = u.select_atoms(selection)
+            mobile = u.select_atoms(selection)
+
+            R = rms.RMSD(u, ref, select=selection, ref_frame=0)
+            R.run()
+
+            print(f"Average RMSD for {domain}: {np.mean(R.rmsd[:, 2]):.2f} Å")
+
+            df['Time (ps)'] = R.rmsd[:, 1]
+            df[domain] = R.rmsd[:, 2]
+
+        df.to_csv(f"{self.results_folder}/rmsd.csv", index=True)
+
+        with open(f"{self.results_folder}/rmsd_summary.txt", "w") as file:
+            file.write(df.describe().to_string())
+
+        return df
