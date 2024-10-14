@@ -24,7 +24,7 @@ class GromacsPlot:
         """
         fig, ax = plt.subplots()
 
-        ax.plot(x, y, linewidth=0.7)
+        ax.plot(x, y, linewidth=0.75)
 
         # Add labels and title
         plt.xlabel(titles[0])
@@ -88,6 +88,11 @@ class GromacsPlot:
 
         ax.lines[0].set_color('black')
 
+        plt.ylim(
+            temperature[:, 1].min() - 2,    
+            temperature[:, 1].max() + 2
+        )
+
         plt.suptitle('Temperature', fontsize=20, y=1)
 
         plt.savefig(
@@ -114,6 +119,11 @@ class GromacsPlot:
         )
 
         ax.lines[0].set_color('black')
+
+        plt.ylim(
+            pressure[:, 1].min() - 60,    
+            pressure[:, 1].max() + 60
+        )
 
         plt.suptitle('Pressure', fontsize=20, y=1)
 
@@ -151,13 +161,18 @@ class GromacsPlot:
             dpi=300
         )
 
+        plt.ylim(
+            density[:, 1].min() - 10,    
+            density[:, 1].max() + 10
+        )
+
     def plot_rmsd(self):
         """
         Plot RMSD
         """
         rmsd = pd.read_csv(f"{self.path}/results/rmsd.csv")
 
-        fig, ax = self.plot_data(
+        _ = self.plot_data(
             rmsd['Time (ps)'].values/1000,
             list(zip(
                 rmsd['Backbone'].values/10,
@@ -202,7 +217,6 @@ class GromacsPlot:
         
         plt.tight_layout()
     
-
         plt.savefig(
             self.images_path + "rmsd.png",
             bbox_inches='tight',
@@ -212,7 +226,7 @@ class GromacsPlot:
 
     def plot_radius_gyration(self):
         """
-        PLot radius of gyration
+        Plot radius of gyration
         """
         gyr = read_xvg_files(f"{self.path}/results/gyrate.xvg")
 
